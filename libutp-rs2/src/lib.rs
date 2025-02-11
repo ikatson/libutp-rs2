@@ -14,12 +14,13 @@ use std::{
 
 use futures::task::AtomicWaker;
 use libutp_rs2_sys::{
-    uint64, utp_callback_arguments, utp_check_timeouts, utp_connect, utp_context_get_userdata,
-    utp_context_set_userdata, utp_create_socket, utp_destroy, utp_error_code_names,
-    utp_get_context, utp_get_userdata, utp_issue_deferred_acks, utp_process_udp, utp_read_drained,
-    utp_set_callback, utp_set_userdata, utp_socket, utp_state_names, utp_write, UTP_ON_ACCEPT,
-    UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO, UTP_STATE_CONNECT,
-    UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
+    uint64, utp_callback_arguments, utp_check_timeouts, utp_close, utp_connect,
+    utp_context_get_userdata, utp_context_set_userdata, utp_create_socket, utp_destroy,
+    utp_error_code_names, utp_get_context, utp_get_userdata, utp_issue_deferred_acks,
+    utp_process_udp, utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket,
+    utp_state_names, utp_write, UTP_ON_ACCEPT, UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ,
+    UTP_ON_STATE_CHANGE, UTP_SENDTO, UTP_STATE_CONNECT, UTP_STATE_DESTROYING, UTP_STATE_EOF,
+    UTP_STATE_WRITABLE,
 };
 use os_socketaddr::OsSocketAddr;
 use parking_lot::{Mutex, ReentrantMutex};
@@ -31,27 +32,6 @@ use ringbuf::{
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, trace, warn};
 use traits::Transport;
-
-/// Arch
-/// UtpContext
-/// - has the transport. Others don't.
-///
-/// UtpStream
-/// - ptr to socket? yes, we need it to call "write()"
-/// - userdata? Just recursive Arc<ReentrantMutex<self>>? Yes, why not.
-///
-/// UtpStream.write()
-/// - gets the global lock. Tries to write
-///   - if written something - Ready(Ok(()))
-///   - if written nothing - register waker.
-///     When we get called again on "UTP_STATE_WRITABLE", wake up the waker
-///
-/// Callbacks are global.
-/// - on_state_change
-///   - on_connect/on_writeable:
-///     - this is probably called from within ANY function like write() etc. We need either a re-entrant lock,
-///       or we need to unsafely assume the lock is already taken. The first is easier.
-///     - get the user data from socket. It should contain the map
 
 static LOCK: ReentrantMutex<()> = ReentrantMutex::new(());
 
@@ -129,11 +109,12 @@ unsafe extern "C" fn utp_on_accept<T: Transport>(args: *mut utp_callback_argumen
 
     let ctx = utp_context_get_userdata(args.context);
     let ctx: *const UtpContext<T> = ctx.cast();
-    let ctx = ctx.as_ref().unwrap();
+    let ctx = Arc::from_raw(ctx);
     if let Some(acc) = ctx.accept_queue.lock().pop_front() {
-        let stream = UtpStream::new(args.socket);
+        let stream = UtpStream::new(args.socket, ctx.clone());
         let _ = acc.send(stream);
     }
+    std::mem::forget(ctx);
     0
 }
 
@@ -143,9 +124,8 @@ unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -
     let data = data.as_ref().unwrap();
 
     let state = args.__bindgen_anon_1.state;
-    dbg!(state);
     let state_name = get_name(&utp_state_names, state);
-    info!("state: {:?}", state_name);
+    trace!("state: {:?}", state_name);
 
     match state as u32 {
         UTP_STATE_EOF => {
@@ -187,7 +167,6 @@ impl<T> Drop for UtpContext<T> {
     fn drop(&mut self) {
         unsafe {
             with_global_lock(|| {
-                // TODO: this is screwed
                 utp_destroy(self.ctx);
             })
         }
@@ -223,16 +202,19 @@ impl<T> Default for UtpStreamInner<T> {
 }
 
 pub struct UtpStream<T> {
-    inner: Arc<UtpStreamInner<T>>,
+    inner: Box<UtpStreamInner<T>>,
+    ctx: Arc<UtpContext<T>>,
 }
 
 impl<T> UtpStream<T> {
-    fn new(sock: *mut utp_socket) -> Self {
+    fn new(sock: *mut utp_socket, ctx: Arc<UtpContext<T>>) -> Self {
+        assert!(!sock.is_null());
         let s = UtpStream {
-            inner: Arc::new(UtpStreamInner {
+            inner: Box::new(UtpStreamInner {
                 utp_socket: sock,
                 ..Default::default()
             }),
+            ctx,
         };
         let inner_ptr: *const UtpStreamInner<T> = s.inner.as_ref();
         unsafe { utp_set_userdata(sock, inner_ptr.cast_mut().cast()) };
@@ -240,11 +222,14 @@ impl<T> UtpStream<T> {
     }
 
     fn get_context(&self) -> &UtpContext<T> {
+        &self.ctx
+    }
+}
+
+impl<T> Drop for UtpStream<T> {
+    fn drop(&mut self) {
         unsafe {
-            let ctx = utp_get_context(self.inner.utp_socket);
-            let udata = utp_context_get_userdata(ctx);
-            let udata: *const UtpContext<T> = udata.cast();
-            udata.as_ref().unwrap()
+            utp_close(self.inner.utp_socket);
         }
     }
 }
@@ -345,18 +330,17 @@ impl<T: Transport> UtpContext<T> {
         Some(stream)
     }
 
-    pub async fn connect(&self, addr: SocketAddr) -> Option<UtpStream<T>> {
+    pub async fn connect(self: &Arc<Self>, addr: SocketAddr) -> Option<UtpStream<T>> {
         with_global_lock(|| {
             let sock = unsafe { utp_create_socket(self.ctx) };
             if sock.is_null() {
                 return None;
             }
 
-            let stream = UtpStream::<T>::new(sock);
+            let stream = UtpStream::<T>::new(sock, self.clone());
             let addr = os_socketaddr::OsSocketAddr::from(addr);
 
             let ret = unsafe { utp_connect(sock, addr.as_ptr().cast(), addr.len()) };
-            dbg!(ret);
             Some(stream)
         })
     }

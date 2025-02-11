@@ -23,3 +23,4 @@ tokio = { version = "1.43.0", features = [
     "time",
     "io-util",
 ] }
+rand = "0.9.0"
