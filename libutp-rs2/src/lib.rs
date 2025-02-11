@@ -1,26 +1,25 @@
 mod traits;
 
 use std::{
-    cell::{RefCell, UnsafeCell},
-    collections::{HashMap, VecDeque},
-    ffi::{c_char, c_int, c_uint, c_void, CStr},
+    collections::VecDeque,
+    ffi::{c_char, c_int, CStr},
     future::Future,
     marker::PhantomData,
     net::SocketAddr,
     sync::{atomic::AtomicBool, Arc},
-    task::{ready, Poll},
+    task::Poll,
     time::Duration,
 };
 
+use anyhow::bail;
 use futures::task::AtomicWaker;
 use libutp_rs2_sys::{
     uint64, utp_callback_arguments, utp_check_timeouts, utp_close, utp_connect,
     utp_context_get_userdata, utp_context_set_userdata, utp_create_socket, utp_destroy,
-    utp_error_code_names, utp_get_context, utp_get_userdata, utp_issue_deferred_acks,
-    utp_process_udp, utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket,
-    utp_state_names, utp_write, UTP_ON_ACCEPT, UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ,
-    UTP_ON_STATE_CHANGE, UTP_SENDTO, UTP_STATE_CONNECT, UTP_STATE_DESTROYING, UTP_STATE_EOF,
-    UTP_STATE_WRITABLE,
+    utp_error_code_names, utp_get_userdata, utp_issue_deferred_acks, utp_process_udp,
+    utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket, utp_state_names, utp_write,
+    UTP_ON_ACCEPT, UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO,
+    UTP_STATE_CONNECT, UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
 };
 use os_socketaddr::OsSocketAddr;
 use parking_lot::{Mutex, ReentrantMutex};
@@ -30,7 +29,7 @@ use ringbuf::{
     LocalRb,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, info, trace, warn};
+use tracing::{trace, warn};
 use traits::Transport;
 
 static LOCK: ReentrantMutex<()> = ReentrantMutex::new(());
@@ -81,9 +80,7 @@ unsafe extern "C" fn utp_on_sendto<T: Transport>(args: *mut utp_callback_argumen
     let sz = udata.transport.try_send_to(buf, addr);
     match sz {
         Ok(0) => warn!("sent 0"),
-        Ok(len) => {
-            // info!(len, "sent");
-        }
+        Ok(_) => {}
         Err(e) => warn!("send error: {e:#}"),
     }
 
@@ -94,13 +91,14 @@ unsafe extern "C" fn utp_on_error<T: Transport>(args: *mut utp_callback_argument
     trace!("utp_on_error");
     let args = args.as_mut().unwrap();
     let error = args.__bindgen_anon_1.error_code;
-    let error = get_name(&utp_error_code_names, error);
+    #[allow(static_mut_refs)]
+    let error = get_name(utp_error_code_names.as_ptr(), error);
     warn!("utp_on_error: {error:?}");
     0
 }
 
-unsafe fn get_name(arr: &[*const c_char], name: i32) -> &str {
-    let cptr = *arr.as_ptr().offset(name as isize);
+unsafe fn get_name(arr: *const *const c_char, name: i32) -> &'static str {
+    let cptr = *arr.offset(name as isize);
     CStr::from_ptr(cptr).to_str().unwrap()
 }
 
@@ -124,7 +122,8 @@ unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -
     let data = data.as_ref().unwrap();
 
     let state = args.__bindgen_anon_1.state;
-    let state_name = get_name(&utp_state_names, state);
+    #[allow(static_mut_refs)]
+    let state_name = get_name(utp_state_names.as_ptr(), state);
     trace!("state: {:?}", state_name);
 
     match state as u32 {
@@ -307,6 +306,9 @@ impl<T: Transport> UtpContext<T> {
                                     osaddr.len(),
                                 )
                             });
+                            if res < 0 {
+                                warn!(res, "utp_process_udp errored");
+                            }
                         };
                     },
                     _ = timeout_interval.tick() => {
@@ -330,18 +332,21 @@ impl<T: Transport> UtpContext<T> {
         Some(stream)
     }
 
-    pub async fn connect(self: &Arc<Self>, addr: SocketAddr) -> Option<UtpStream<T>> {
+    pub async fn connect(self: &Arc<Self>, addr: SocketAddr) -> anyhow::Result<UtpStream<T>> {
         with_global_lock(|| {
             let sock = unsafe { utp_create_socket(self.ctx) };
             if sock.is_null() {
-                return None;
+                bail!("utp_create_socket returned null");
             }
 
             let stream = UtpStream::<T>::new(sock, self.clone());
             let addr = os_socketaddr::OsSocketAddr::from(addr);
 
             let ret = unsafe { utp_connect(sock, addr.as_ptr().cast(), addr.len()) };
-            Some(stream)
+            if ret < 0 {
+                bail!("utp_connect returned an error");
+            }
+            Ok(stream)
         })
     }
 }
@@ -398,14 +403,14 @@ impl<T: Transport> AsyncWrite for UtpStream<T> {
 
     fn poll_flush(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> Poll<std::io::Result<()>> {
         todo!()
     }
 
     fn poll_shutdown(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         todo!()
     }
@@ -413,35 +418,3 @@ impl<T: Transport> AsyncWrite for UtpStream<T> {
 
 pub type UtpUdpContext = UtpContext<tokio::net::UdpSocket>;
 pub type UtpUdpStream = UtpStream<tokio::net::UdpSocket>;
-
-#[cfg(test)]
-mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-    use libutp_rs2_sys::{utp_connect, utp_set_callback, UTP_ON_CONNECT};
-
-    #[tokio::test]
-    async fn test_init_basic() {
-        let ctx = unsafe { libutp_rs2_sys::utp_init(2) };
-        assert!(!ctx.is_null());
-
-        let sock = unsafe { libutp_rs2_sys::utp_create_socket(ctx) };
-        assert!(!sock.is_null());
-
-        let listen = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 5001);
-
-        let listen_os = os_socketaddr::OsSocketAddr::from(listen);
-
-        unsafe {
-            utp_connect(
-                sock,
-                listen_os.as_ptr() as *const libutp_rs2_sys::sockaddr,
-                listen_os.len(),
-            )
-        };
-
-        // utp_set_callback(ctx, UTP_ON_CONNECT, proc_);
-
-        todo!()
-    }
-}

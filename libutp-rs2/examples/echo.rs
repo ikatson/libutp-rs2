@@ -1,7 +1,6 @@
 use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
     time::Duration,
 };
 

@@ -82,9 +82,9 @@ impl Transport for UdpSocket {
         buf: &mut [u8],
     ) -> Poll<std::io::Result<(usize, SocketAddr)>> {
         let mut b = tokio::io::ReadBuf::new(buf);
-        match UdpSocket::poll_recv_from(&self, cx, &mut b) {
+        match UdpSocket::poll_recv_from(self, cx, &mut b) {
             Poll::Ready(Ok(addr)) => Poll::Ready(Ok((b.filled().len(), addr))),
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Pending => Poll::Pending,
         }
     }
