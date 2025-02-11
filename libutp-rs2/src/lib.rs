@@ -15,12 +15,11 @@ use anyhow::bail;
 use futures::task::AtomicWaker;
 use libutp_rs2_sys::{
     uint64, utp_callback_arguments, utp_check_timeouts, utp_close, utp_connect,
-    utp_context_get_userdata, utp_context_set_option, utp_context_set_userdata, utp_create_socket,
-    utp_destroy, utp_error_code_names, utp_get_userdata, utp_init, utp_issue_deferred_acks,
-    utp_process_udp, utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket,
-    utp_state_names, utp_write, UTP_LOG, UTP_LOG_DEBUG, UTP_LOG_NORMAL, UTP_ON_ACCEPT,
-    UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO, UTP_STATE_CONNECT,
-    UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
+    utp_context_get_userdata, utp_context_set_userdata, utp_create_socket, utp_destroy,
+    utp_error_code_names, utp_get_userdata, utp_init, utp_issue_deferred_acks, utp_process_udp,
+    utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket, utp_state_names, utp_write,
+    UTP_ON_ACCEPT, UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO,
+    UTP_STATE_CONNECT, UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
 };
 use os_socketaddr::OsSocketAddr;
 use parking_lot::{Mutex, ReentrantMutex};
@@ -30,7 +29,7 @@ use ringbuf::{
     LocalRb,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 use traits::Transport;
 
 static LOCK: ReentrantMutex<()> = ReentrantMutex::new(());
@@ -58,6 +57,7 @@ unsafe extern "C" fn utp_on_connect<T>(args: *mut utp_callback_arguments) -> uin
     0
 }
 
+#[allow(unused)]
 unsafe extern "C" fn utp_log<T>(args: *mut utp_callback_arguments) -> uint64 {
     trace!("utp_log");
     let args = args.as_mut().unwrap();
@@ -119,7 +119,7 @@ unsafe extern "C" fn utp_on_error<T: Transport>(args: *mut utp_callback_argument
     let error = args.__bindgen_anon_1.error_code;
     #[allow(static_mut_refs)]
     let error = get_name(utp_error_code_names.as_ptr(), error);
-    warn!("utp_on_error: {error:?}");
+    debug!("utp_on_error: {error:?}");
     0
 }
 
@@ -133,7 +133,7 @@ unsafe extern "C" fn utp_on_accept<T: Transport>(args: *mut utp_callback_argumen
 
     let ctx: *const UtpContext<T> = utp_context_get_userdata(args.context).cast();
     if ctx.is_null() {
-        warn!("utp_on_accept: null ctx");
+        debug!("utp_on_accept: null ctx");
         return 0;
     }
     let ctx = Arc::from_raw(ctx);
@@ -150,7 +150,7 @@ unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -
     let args = args.as_mut().unwrap();
     let data: *const UtpStreamInner<T> = utp_get_userdata(args.socket).cast();
     if data.is_null() {
-        warn!("utp_on_state_change: null userdata");
+        debug!("utp_on_state_change: null userdata");
         return 0;
     }
     let data = data.as_ref().unwrap();
@@ -353,7 +353,7 @@ impl<T: Transport> UtpContext<T> {
                                 )
                             });
                             if res < 0 {
-                                warn!(res, "utp_process_udp errored");
+                                debug!(res, "utp_process_udp errored");
                             }
                         };
                     },
