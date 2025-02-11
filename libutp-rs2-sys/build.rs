@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const LIBUTP_PATH: &str = "../../libutp";
 
@@ -6,12 +6,13 @@ fn main() {
     let bindings = bindgen::Builder::default()
         .use_core()
         .header(format!("{LIBUTP_PATH}/utp.h"))
+        .derive_debug(true)
         .generate()
         .expect("unable to generate bindings");
 
-    let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    // let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     bindings
-        .write_to_file(out_path.join("bindings.rs"))
+        .write_to_file(Path::new("src").join("bindings.rs"))
         .expect("Couldn't write bindings!");
 
     let mut builder = cc::Build::new();

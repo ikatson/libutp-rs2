@@ -9,4 +9,17 @@ lazy_static = "1.5.0"
 libutp-rs2-sys = { path = "../libutp-rs2-sys" }
 os_socketaddr = "0.2.5"
 parking_lot = "0.12.3"
-tokio = { version = "1.43.0", features = ["net", "macros", "rt"] }
+ringbuf = "0.4.7"
+tokio = { version = "1.43.0", features = ["net", "macros", "rt", "sync"] }
+tracing = "0.1.41"
+
+[dev-dependencies]
+anyhow = "1.0.95"
+tracing-subscriber = "0.3.19"
+tokio = { version = "1.43.0", features = [
+    "net",
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "io-util",
+] }
