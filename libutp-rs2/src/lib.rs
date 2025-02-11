@@ -15,11 +15,12 @@ use anyhow::bail;
 use futures::task::AtomicWaker;
 use libutp_rs2_sys::{
     uint64, utp_callback_arguments, utp_check_timeouts, utp_close, utp_connect,
-    utp_context_get_userdata, utp_context_set_userdata, utp_create_socket, utp_destroy,
-    utp_error_code_names, utp_get_userdata, utp_issue_deferred_acks, utp_process_udp,
-    utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket, utp_state_names, utp_write,
-    UTP_ON_ACCEPT, UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO,
-    UTP_STATE_CONNECT, UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
+    utp_context_get_userdata, utp_context_set_option, utp_context_set_userdata, utp_create_socket,
+    utp_destroy, utp_error_code_names, utp_get_userdata, utp_init, utp_issue_deferred_acks,
+    utp_process_udp, utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket,
+    utp_state_names, utp_write, UTP_LOG, UTP_LOG_DEBUG, UTP_LOG_NORMAL, UTP_ON_ACCEPT,
+    UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO, UTP_STATE_CONNECT,
+    UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
 };
 use os_socketaddr::OsSocketAddr;
 use parking_lot::{Mutex, ReentrantMutex};
@@ -34,6 +35,8 @@ use traits::Transport;
 
 static LOCK: ReentrantMutex<()> = ReentrantMutex::new(());
 
+const MAGIC: usize = 0x42424242_42424242;
+
 pub fn with_global_lock<R>(f: impl FnOnce() -> R) -> R {
     let _g = LOCK.lock();
     f()
@@ -42,11 +45,24 @@ pub fn with_global_lock<R>(f: impl FnOnce() -> R) -> R {
 unsafe extern "C" fn utp_on_connect<T>(args: *mut utp_callback_arguments) -> uint64 {
     trace!("utp_on_connect");
     let args = args.as_mut().unwrap();
-    let data = utp_get_userdata(args.socket) as SocketUserData<T>;
+    let data: *const UtpStreamInner<T> = utp_get_userdata(args.socket).cast();
+    if data.is_null() {
+        warn!("utp_on_connect: null socket");
+        return 0;
+    }
     let data = data.as_ref().unwrap();
+    assert!(data.magic == MAGIC);
     data.writeable_waker.wake();
 
     // TODO: what to return?
+    0
+}
+
+unsafe extern "C" fn utp_log<T>(args: *mut utp_callback_arguments) -> uint64 {
+    trace!("utp_log");
+    let args = args.as_mut().unwrap();
+    let logline = CStr::from_ptr(args.buf.cast()).to_str().unwrap();
+    trace!("{}", logline);
     0
 }
 
@@ -54,7 +70,12 @@ unsafe extern "C" fn utp_on_read<T>(args: *mut utp_callback_arguments) -> uint64
     trace!("utp_on_read");
     let args = args.as_mut().unwrap();
     let data = utp_get_userdata(args.socket) as SocketUserData<T>;
+    if data.is_null() {
+        warn!("utp_on_read called with null socket");
+        return 0;
+    }
     let data = data.as_ref().unwrap();
+    assert!(data.magic == MAGIC);
 
     let inbuf = std::slice::from_raw_parts(args.buf, args.len);
     let mut buf = data.buffer.lock();
@@ -75,7 +96,12 @@ unsafe extern "C" fn utp_on_sendto<T: Transport>(args: *mut utp_callback_argumen
         .into_addr()
         .unwrap();
     let udata: *const UtpContext<T> = utp_context_get_userdata(args.context).cast();
+    if udata.is_null() {
+        warn!("utp_on_sendto: null context");
+        return 0;
+    }
     let udata = udata.as_ref().unwrap();
+    assert!(udata.magic == MAGIC);
     let buf = core::slice::from_raw_parts(args.buf, args.len);
     let sz = udata.transport.try_send_to(buf, addr);
     match sz {
@@ -105,9 +131,13 @@ unsafe fn get_name(arr: *const *const c_char, name: i32) -> &'static str {
 unsafe extern "C" fn utp_on_accept<T: Transport>(args: *mut utp_callback_arguments) -> uint64 {
     let args = args.as_mut().unwrap();
 
-    let ctx = utp_context_get_userdata(args.context);
-    let ctx: *const UtpContext<T> = ctx.cast();
+    let ctx: *const UtpContext<T> = utp_context_get_userdata(args.context).cast();
+    if ctx.is_null() {
+        warn!("utp_on_accept: null ctx");
+        return 0;
+    }
     let ctx = Arc::from_raw(ctx);
+    assert!(ctx.magic == MAGIC);
     if let Some(acc) = ctx.accept_queue.lock().pop_front() {
         let stream = UtpStream::new(args.socket, ctx.clone());
         let _ = acc.send(stream);
@@ -118,8 +148,13 @@ unsafe extern "C" fn utp_on_accept<T: Transport>(args: *mut utp_callback_argumen
 
 unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -> uint64 {
     let args = args.as_mut().unwrap();
-    let data = utp_get_userdata(args.socket) as SocketUserData<T>;
+    let data: *const UtpStreamInner<T> = utp_get_userdata(args.socket).cast();
+    if data.is_null() {
+        warn!("utp_on_state_change: null userdata");
+        return 0;
+    }
     let data = data.as_ref().unwrap();
+    assert!(data.magic == MAGIC);
 
     let state = args.__bindgen_anon_1.state;
     #[allow(static_mut_refs)]
@@ -156,6 +191,8 @@ type SocketUserData<T> = *const UtpStreamInner<T>;
 pub struct UtpContext<T> {
     transport: T,
 
+    magic: usize,
+
     accept_queue: Mutex<VecDeque<tokio::sync::oneshot::Sender<UtpStream<T>>>>,
 
     // TODO: store hidden pointer that can only be looked at with the global lock
@@ -166,6 +203,7 @@ impl<T> Drop for UtpContext<T> {
     fn drop(&mut self) {
         unsafe {
             with_global_lock(|| {
+                utp_context_set_userdata(self.ctx, core::ptr::null_mut());
                 utp_destroy(self.ctx);
             })
         }
@@ -177,6 +215,7 @@ unsafe impl<T: Send> Sync for UtpContext<T> {}
 
 struct UtpStreamInner<T> {
     buffer: Mutex<LocalRb<Heap<u8>>>,
+    magic: usize,
     is_eof: AtomicBool,
     readable_waker: AtomicWaker,
     writeable_waker: AtomicWaker,
@@ -191,6 +230,7 @@ impl<T> Default for UtpStreamInner<T> {
     fn default() -> Self {
         Self {
             buffer: Mutex::new(LocalRb::new(1024 * 1024)),
+            magic: MAGIC,
             is_eof: Default::default(),
             readable_waker: Default::default(),
             writeable_waker: Default::default(),
@@ -228,48 +268,54 @@ impl<T> UtpStream<T> {
 impl<T> Drop for UtpStream<T> {
     fn drop(&mut self) {
         unsafe {
+            utp_set_userdata(self.inner.utp_socket, core::ptr::null_mut());
             utp_close(self.inner.utp_socket);
         }
     }
 }
 
 impl UtpUdpContext {
-    pub async fn new_udp(bind_addr: SocketAddr) -> Option<Arc<Self>> {
+    pub async fn new_udp(bind_addr: SocketAddr) -> anyhow::Result<Arc<Self>> {
         let sock = tokio::net::UdpSocket::bind(bind_addr).await.unwrap();
         Self::new(sock)
     }
 }
 
 impl<T: Transport> UtpContext<T> {
-    pub fn new(transport: T) -> Option<Arc<Self>> {
-        let ctx = unsafe { libutp_rs2_sys::utp_init(2) };
-        if ctx.is_null() {
-            return None;
-        }
-
-        unsafe { utp_set_callback(ctx, UTP_ON_CONNECT as c_int, Some(utp_on_connect::<T>)) };
+    pub fn new(transport: T) -> anyhow::Result<Arc<Self>> {
         unsafe {
+            let ctx = utp_init(2);
+            if ctx.is_null() {
+                bail!("utp_init returned NULL");
+            }
+
+            // utp_context_set_option(ctx, UTP_LOG_NORMAL as _, 1);
+            // utp_context_set_option(ctx, UTP_LOG_DEBUG as _, 1);
+
+            utp_set_callback(ctx, UTP_ON_CONNECT as c_int, Some(utp_on_connect::<T>));
+            // utp_set_callback(ctx, UTP_LOG as c_int, Some(utp_log::<T>));
             utp_set_callback(
                 ctx,
                 UTP_ON_STATE_CHANGE as c_int,
                 Some(utp_on_state_change::<T>),
-            )
-        };
-        unsafe { utp_set_callback(ctx, UTP_ON_READ as c_int, Some(utp_on_read::<T>)) };
-        unsafe { utp_set_callback(ctx, UTP_SENDTO as c_int, Some(utp_on_sendto::<T>)) };
-        unsafe { utp_set_callback(ctx, UTP_ON_ERROR as c_int, Some(utp_on_error::<T>)) };
-        unsafe { utp_set_callback(ctx, UTP_ON_ACCEPT as c_int, Some(utp_on_accept::<T>)) };
+            );
+            utp_set_callback(ctx, UTP_ON_READ as c_int, Some(utp_on_read::<T>));
+            utp_set_callback(ctx, UTP_SENDTO as c_int, Some(utp_on_sendto::<T>));
+            utp_set_callback(ctx, UTP_ON_ERROR as c_int, Some(utp_on_error::<T>));
+            utp_set_callback(ctx, UTP_ON_ACCEPT as c_int, Some(utp_on_accept::<T>));
 
-        let res = Arc::new(Self {
-            transport,
-            ctx,
-            accept_queue: Default::default(),
-        });
-        let resptr: *const Self = res.as_ref();
-        unsafe { utp_context_set_userdata(ctx, resptr.cast_mut().cast()) };
+            let res = Arc::new(Self {
+                transport,
+                ctx,
+                accept_queue: Default::default(),
+                magic: MAGIC,
+            });
+            let resptr: *const Self = res.as_ref();
+            utp_context_set_userdata(ctx, resptr.cast_mut().cast());
 
-        Self::spawn(res.clone());
-        Some(res)
+            Self::spawn(res.clone());
+            Ok(res)
+        }
     }
 
     fn recv_from<'a>(

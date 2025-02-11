@@ -2,10 +2,8 @@
 
 pub const UTP_IOV_MAX: u32 = 1024;
 pub type __uint8_t = ::core::ffi::c_uchar;
-pub type __uint32_t = ::core::ffi::c_uint;
-pub type __darwin_socklen_t = __uint32_t;
 pub type sa_family_t = __uint8_t;
-pub type socklen_t = __darwin_socklen_t;
+pub type socklen_t = u32;
 pub type byte = ::core::ffi::c_uchar;
 pub type uint16 = ::core::ffi::c_ushort;
 pub type uint32 = ::core::ffi::c_uint;

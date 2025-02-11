@@ -7,9 +7,8 @@ fn main() {
         .use_core()
         .header(format!("{LIBUTP_PATH}/utp.h"))
         .allowlist_item(".*(utp|UTP).*")
+        .opaque_type("socklen_t")
         .blocklist_type("sockaddr")
-        .must_use_type("::core::ffi::c_int")
-        .derive_debug(true)
         .generate()
         .expect("unable to generate bindings");
 
