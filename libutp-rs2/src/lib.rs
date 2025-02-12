@@ -42,71 +42,102 @@ pub fn with_global_lock<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+macro_rules! cbcheck {
+    ($ptr:expr, $where:expr, $name:expr) => {
+        match $ptr.as_ref() {
+            Some(r) => r,
+            None => {
+                tracing::debug!("{}: {} is null", $where, $name);
+                return 0;
+            }
+        }
+    };
+    (mut $ptr:expr, $where:expr, $name:expr) => {
+        match $ptr.as_mut() {
+            Some(r) => r,
+            None => {
+                tracing::debug!("{}: {} is null", $where, $name);
+                return 0;
+            }
+        }
+    };
+    (magic $v:expr, $where:expr, $name:expr) => {
+        if $v != MAGIC {
+            tracing::error!("{}: {} magic does not match, huge bug!", $where, $name);
+            return 0;
+        }
+    };
+    (socket $v:expr, $where:expr) => {{
+        let data: *const UtpStreamInner<T> = utp_get_userdata($v).cast();
+        let data = cbcheck!(data, $where, "socket");
+        cbcheck!(magic data.magic, $where, "socket");
+        data
+    }};
+    (context $v:expr, $where:expr) => {{
+        let data: *const UtpContext<T> = utp_context_get_userdata($v).cast();
+        let data = cbcheck!(data, $where, "context");
+        cbcheck!(magic data.magic, $where, "context");
+        data
+    }};
+    (cbargs $v:expr, $where:expr) => {
+        cbcheck!($v, $where, "utp_callback_arguments")
+    };
+}
+
 unsafe extern "C" fn utp_on_connect<T>(args: *mut utp_callback_arguments) -> uint64 {
-    let args = args.as_mut().unwrap();
-    let data: *const UtpStreamInner<T> = utp_get_userdata(args.socket).cast();
-    if data.is_null() {
-        warn!("utp_on_connect: null socket");
-        return 0;
-    }
-    let data = data.as_ref().unwrap();
-    assert!(data.magic == MAGIC);
+    let args = cbcheck!(cbargs args, "utp_on_connect");
+    let data = cbcheck!(socket args.socket, "utp_on_connect");
     data.writeable_waker.wake();
     0
 }
 
 #[allow(unused)]
 unsafe extern "C" fn utp_log(args: *mut utp_callback_arguments) -> uint64 {
-    let args = args.as_mut().unwrap();
-    let logline = CStr::from_ptr(args.buf.cast()).to_str().unwrap();
-    trace!("{}", logline);
+    let args = cbcheck!(cbargs args, "utp_log");
+    if let Ok(logline) = CStr::from_ptr(args.buf.cast()).to_str() {
+        trace!("{}", logline);
+    } else {
+        warn!("utp_log: invalid UTF-8");
+    }
     0
 }
 
 unsafe extern "C" fn utp_on_read<T>(args: *mut utp_callback_arguments) -> uint64 {
-    let args = args.as_mut().unwrap();
-    let data = utp_get_userdata(args.socket) as SocketUserData<T>;
-    if data.is_null() {
-        warn!("utp_on_read called with null socket");
-        return 0;
-    }
-    let data = data.as_ref().unwrap();
-    assert!(data.magic == MAGIC);
-
+    let args = cbcheck!(cbargs args, "utp_on_read");
+    let sock = cbcheck!(socket args.socket, "utp_on_read");
     let inbuf = std::slice::from_raw_parts(args.buf, args.len);
-    let mut buf = data.buffer.lock();
+    let mut buf = sock.buffer.lock();
     buf.push_slice(inbuf);
     utp_read_drained(args.socket);
-    data.readable_waker.wake();
+    sock.readable_waker.wake();
     0
 }
 
 unsafe extern "C" fn utp_on_sendto<T: Transport>(args: *mut utp_callback_arguments) -> uint64 {
-    let args = args.as_mut().unwrap();
+    let args = cbcheck!(cbargs args, "utp_on_sendto");
     let addr = args.unnamed_field1.address;
-    let addr = OsSocketAddr::copy_from_raw(addr.cast(), args.unnamed_field2.address_len)
+    let addr = match OsSocketAddr::copy_from_raw(addr.cast(), args.unnamed_field2.address_len)
         .into_addr()
-        .unwrap();
-    let udata: *const UtpContext<T> = utp_context_get_userdata(args.context).cast();
-    if udata.is_null() {
-        warn!("utp_on_sendto: null context");
-        return 0;
-    }
-    let udata = udata.as_ref().unwrap();
-    assert!(udata.magic == MAGIC);
+    {
+        Some(a) => a,
+        None => {
+            warn!("utp_on_sendto: bad address");
+            return 0;
+        }
+    };
+    let ctx = cbcheck!(context args.context, "utp_on_sendto");
     let buf = core::slice::from_raw_parts(args.buf, args.len);
-    let sz = udata.transport.try_send_to(buf, addr);
+    let sz = ctx.transport.try_send_to(buf, addr);
     match sz {
         Ok(0) => warn!("sent 0"),
         Ok(_) => {}
         Err(e) => warn!("send error: {e:#}"),
     }
-
     0
 }
 
 unsafe extern "C" fn utp_on_error(args: *mut utp_callback_arguments) -> uint64 {
-    let args = args.as_mut().unwrap();
+    let args = cbcheck!(cbargs args, "utp_on_error");
     let error = args.unnamed_field1.error_code;
     #[allow(static_mut_refs)]
     let error = get_name(utp_error_code_names.as_ptr(), error);
@@ -116,36 +147,30 @@ unsafe extern "C" fn utp_on_error(args: *mut utp_callback_arguments) -> uint64 {
 
 unsafe fn get_name(arr: *const *const c_char, name: i32) -> &'static str {
     let cptr = *arr.offset(name as isize);
-    CStr::from_ptr(cptr).to_str().unwrap()
+    CStr::from_ptr(cptr).to_str().unwrap_or("<INVALID UTF-8>")
+}
+
+unsafe fn clone_arc_from_ptr<T>(ptr: *const T) -> Arc<T> {
+    Arc::increment_strong_count(ptr);
+    Arc::from_raw(ptr)
 }
 
 unsafe extern "C" fn utp_on_accept<T: Transport>(args: *mut utp_callback_arguments) -> uint64 {
-    let args = args.as_mut().unwrap();
-
-    let ctx: *const UtpContext<T> = utp_context_get_userdata(args.context).cast();
-    if ctx.is_null() {
-        debug!("utp_on_accept: null ctx");
-        return 0;
-    }
-    let ctx = Arc::from_raw(ctx);
-    assert!(ctx.magic == MAGIC);
+    let args = cbcheck!(cbargs args, "utp_on_accept");
+    let ctx = cbcheck!(context args.context, "utp_on_accept");
     if let Some(acc) = ctx.accept_queue.lock().pop_front() {
-        let stream = UtpStream::new(args.socket, ctx.clone());
+        let stream = UtpStream::new(args.socket, clone_arc_from_ptr(ctx));
         let _ = acc.send(stream);
+    } else {
+        debug!("skipping accepted socket as no acceptors");
+        utp_close(args.socket);
     }
-    std::mem::forget(ctx);
     0
 }
 
 unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -> uint64 {
-    let args = args.as_mut().unwrap();
-    let data: *const UtpStreamInner<T> = utp_get_userdata(args.socket).cast();
-    if data.is_null() {
-        debug!("utp_on_state_change: null userdata");
-        return 0;
-    }
-    let data = data.as_ref().unwrap();
-    assert!(data.magic == MAGIC);
+    let args = cbcheck!(cbargs args, "utp_on_state_change");
+    let sock = cbcheck!(socket args.socket, "utp_on_state_change");
 
     let state = args.unnamed_field1.state;
     #[allow(static_mut_refs)]
@@ -154,19 +179,19 @@ unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -
 
     match state as u32 {
         UTP_STATE_EOF => {
-            data.is_eof.store(true, std::sync::atomic::Ordering::SeqCst);
-            data.readable_waker.wake();
+            sock.is_eof.store(true, std::sync::atomic::Ordering::SeqCst);
+            sock.readable_waker.wake();
         }
         UTP_STATE_CONNECT => {
-            data.writeable_waker.wake();
+            sock.writeable_waker.wake();
         }
         UTP_STATE_WRITABLE => {
-            data.writeable_waker.wake();
+            sock.writeable_waker.wake();
         }
         UTP_STATE_DESTROYING => {
-            data.is_eof.store(true, std::sync::atomic::Ordering::SeqCst);
-            data.readable_waker.wake();
-            data.writeable_waker.wake();
+            sock.is_eof.store(true, std::sync::atomic::Ordering::SeqCst);
+            sock.readable_waker.wake();
+            sock.writeable_waker.wake();
         }
         other => {
             warn!(other, "unknown libutp state")
@@ -175,8 +200,6 @@ unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -
     0
 }
 
-type SocketUserData<T> = *const UtpStreamInner<T>;
-
 pub struct UtpContext<T> {
     transport: T,
 
@@ -184,7 +207,6 @@ pub struct UtpContext<T> {
 
     accept_queue: Mutex<VecDeque<tokio::sync::oneshot::Sender<UtpStream<T>>>>,
 
-    // TODO: store hidden pointer that can only be looked at with the global lock
     ctx: *mut libutp_rs2_sys::utp_context,
 }
 
@@ -376,7 +398,6 @@ impl<T: Transport> UtpContext<T> {
                     _ = timeout_interval.tick() => {
                         unsafe {
                             with_global_lock(|| {
-                                // info!("utp_check_timeouts");
                                 utp_check_timeouts(self.ctx);
                             })
                         }
