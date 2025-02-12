@@ -1,12 +1,13 @@
 use std::path::Path;
 
-const LIBUTP_PATH: &str = "../../libutp";
+const LIBUTP_PATH: &str = "libutp";
 
 fn main() {
     let bindings = bindgen::Builder::default()
         .use_core()
         .header(format!("{LIBUTP_PATH}/utp.h"))
         .allowlist_item(".*(utp|UTP).*")
+        .anon_fields_prefix("unnamed_field")
         .opaque_type("socklen_t")
         .blocklist_type("sockaddr")
         .generate()
@@ -21,8 +22,14 @@ fn main() {
 
     builder
         .cpp(true)
-        .define("POSIX", "")
-        // .include(LIBUTP_PATH)
+        .define(
+            if cfg!(unix) {
+                "POSIX"
+            } else {
+                "__UNUSED_NOT_POSIX"
+            },
+            "",
+        )
         .files(
             [
                 "utp_internal.cpp",
@@ -35,6 +42,7 @@ fn main() {
             .into_iter()
             .map(|f| format!("{LIBUTP_PATH}/{f}")),
         )
+        .warnings(false)
         .compile("libutp");
 
     println!("cargo:rustc-link-lib=static=libutp")

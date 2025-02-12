@@ -43,7 +43,6 @@ pub fn with_global_lock<R>(f: impl FnOnce() -> R) -> R {
 }
 
 unsafe extern "C" fn utp_on_connect<T>(args: *mut utp_callback_arguments) -> uint64 {
-    trace!("utp_on_connect");
     let args = args.as_mut().unwrap();
     let data: *const UtpStreamInner<T> = utp_get_userdata(args.socket).cast();
     if data.is_null() {
@@ -53,14 +52,11 @@ unsafe extern "C" fn utp_on_connect<T>(args: *mut utp_callback_arguments) -> uin
     let data = data.as_ref().unwrap();
     assert!(data.magic == MAGIC);
     data.writeable_waker.wake();
-
-    // TODO: what to return?
     0
 }
 
 #[allow(unused)]
 unsafe extern "C" fn utp_log(args: *mut utp_callback_arguments) -> uint64 {
-    trace!("utp_log");
     let args = args.as_mut().unwrap();
     let logline = CStr::from_ptr(args.buf.cast()).to_str().unwrap();
     trace!("{}", logline);
@@ -68,7 +64,6 @@ unsafe extern "C" fn utp_log(args: *mut utp_callback_arguments) -> uint64 {
 }
 
 unsafe extern "C" fn utp_on_read<T>(args: *mut utp_callback_arguments) -> uint64 {
-    trace!("utp_on_read");
     let args = args.as_mut().unwrap();
     let data = utp_get_userdata(args.socket) as SocketUserData<T>;
     if data.is_null() {
@@ -82,18 +77,14 @@ unsafe extern "C" fn utp_on_read<T>(args: *mut utp_callback_arguments) -> uint64
     let mut buf = data.buffer.lock();
     buf.push_slice(inbuf);
     utp_read_drained(args.socket);
-    // info!("utp_read_drained, utp_issue_deferred_acks");
-
     data.readable_waker.wake();
     0
 }
 
 unsafe extern "C" fn utp_on_sendto<T: Transport>(args: *mut utp_callback_arguments) -> uint64 {
-    trace!("utp_on_sendto");
     let args = args.as_mut().unwrap();
-
-    let addr = args.__bindgen_anon_1.address;
-    let addr = OsSocketAddr::copy_from_raw(addr.cast(), args.__bindgen_anon_2.address_len)
+    let addr = args.unnamed_field1.address;
+    let addr = OsSocketAddr::copy_from_raw(addr.cast(), args.unnamed_field2.address_len)
         .into_addr()
         .unwrap();
     let udata: *const UtpContext<T> = utp_context_get_userdata(args.context).cast();
@@ -115,9 +106,8 @@ unsafe extern "C" fn utp_on_sendto<T: Transport>(args: *mut utp_callback_argumen
 }
 
 unsafe extern "C" fn utp_on_error(args: *mut utp_callback_arguments) -> uint64 {
-    trace!("utp_on_error");
     let args = args.as_mut().unwrap();
-    let error = args.__bindgen_anon_1.error_code;
+    let error = args.unnamed_field1.error_code;
     #[allow(static_mut_refs)]
     let error = get_name(utp_error_code_names.as_ptr(), error);
     debug!("utp_on_error: {error:?}");
@@ -157,7 +147,7 @@ unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -
     let data = data.as_ref().unwrap();
     assert!(data.magic == MAGIC);
 
-    let state = args.__bindgen_anon_1.state;
+    let state = args.unnamed_field1.state;
     #[allow(static_mut_refs)]
     let state_name = get_name(utp_state_names.as_ptr(), state);
     trace!("state: {:?}", state_name);
@@ -178,12 +168,10 @@ unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -
             data.readable_waker.wake();
             data.writeable_waker.wake();
         }
-        _ => {
-            todo!()
+        other => {
+            warn!(other, "unknown libutp state")
         }
     };
-
-    data.writeable_waker.wake();
     0
 }
 
@@ -369,7 +357,7 @@ impl<T: Transport> UtpContext<T> {
                 tokio::select! {
                     res = self.recv_from(&mut buf) => {
                         let (len, addr) = res.unwrap();
-                        let osaddr = os_socketaddr::OsSocketAddr::from(addr);
+                        let osaddr = OsSocketAddr::from(addr);
                         unsafe {
                             let res = with_global_lock(|| {
                                 utp_process_udp(
@@ -414,7 +402,7 @@ impl<T: Transport> UtpContext<T> {
             }
 
             let stream = UtpStream::<T>::new(sock, self.clone());
-            let addr = os_socketaddr::OsSocketAddr::from(addr);
+            let addr = OsSocketAddr::from(addr);
 
             let ret = unsafe { utp_connect(sock, addr.as_ptr().cast(), addr.len()) };
             if ret < 0 {

@@ -73,8 +73,8 @@ pub struct utp_callback_arguments {
     pub flags: uint32,
     pub callback_type: ::core::ffi::c_int,
     pub buf: *const byte,
-    pub __bindgen_anon_1: utp_callback_arguments__bindgen_ty_1,
-    pub __bindgen_anon_2: utp_callback_arguments__bindgen_ty_2,
+    pub unnamed_field1: utp_callback_arguments__bindgen_ty_1,
+    pub unnamed_field2: utp_callback_arguments__bindgen_ty_2,
 }
 #[repr(C)]
 #[derive(Copy, Clone)]
