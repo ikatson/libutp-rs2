@@ -13,7 +13,7 @@ fn main() {
         .generate()
         .expect("unable to generate bindings");
 
-    // let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    // Writing to src makes autocomplete etc work.
     bindings
         .write_to_file(Path::new("src").join("bindings.rs"))
         .expect("Couldn't write bindings!");
