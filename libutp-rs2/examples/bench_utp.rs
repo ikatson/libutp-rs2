@@ -12,6 +12,8 @@ use tracing::info;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const PRINT_INTERVAL: Duration = Duration::from_secs(1);
+
+// Use Ethernet MTU although on localhost it can be higher.
 const BUFFER_SIZE: usize = 1520 - 20 - 8 - 8;
 
 async fn sender(mut stream: UtpUdpStream) -> anyhow::Result<()> {
