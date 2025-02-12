@@ -467,14 +467,14 @@ impl<T: Transport> AsyncWrite for UtpStream<T> {
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> Poll<std::io::Result<()>> {
-        todo!()
+        Poll::Ready(Err(std::io::Error::other("poll_flush not implemented")))
     }
 
     fn poll_shutdown(
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        todo!()
+        Poll::Ready(Err(std::io::Error::other("poll_shutdown not implemented")))
     }
 }
 
