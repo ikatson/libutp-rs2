@@ -15,11 +15,12 @@ use anyhow::bail;
 use futures::task::AtomicWaker;
 use libutp_rs2_sys::{
     uint64, utp_callback_arguments, utp_check_timeouts, utp_close, utp_connect,
-    utp_context_get_userdata, utp_context_set_userdata, utp_create_socket, utp_destroy,
-    utp_error_code_names, utp_get_userdata, utp_init, utp_issue_deferred_acks, utp_process_udp,
-    utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket, utp_state_names, utp_write,
-    UTP_ON_ACCEPT, UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO,
-    UTP_STATE_CONNECT, UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
+    utp_context_get_userdata, utp_context_set_option, utp_context_set_userdata, utp_create_socket,
+    utp_destroy, utp_error_code_names, utp_get_userdata, utp_init, utp_issue_deferred_acks,
+    utp_process_udp, utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket,
+    utp_state_names, utp_write, UTP_LOG, UTP_LOG_DEBUG, UTP_LOG_NORMAL, UTP_ON_ACCEPT,
+    UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO, UTP_STATE_CONNECT,
+    UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
 };
 use os_socketaddr::OsSocketAddr;
 use parking_lot::{Mutex, ReentrantMutex};
@@ -30,7 +31,7 @@ use ringbuf::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, trace, warn};
-use traits::Transport;
+pub use traits::Transport;
 
 static LOCK: ReentrantMutex<()> = ReentrantMutex::new(());
 
@@ -58,7 +59,7 @@ unsafe extern "C" fn utp_on_connect<T>(args: *mut utp_callback_arguments) -> uin
 }
 
 #[allow(unused)]
-unsafe extern "C" fn utp_log<T>(args: *mut utp_callback_arguments) -> uint64 {
+unsafe extern "C" fn utp_log(args: *mut utp_callback_arguments) -> uint64 {
     trace!("utp_log");
     let args = args.as_mut().unwrap();
     let logline = CStr::from_ptr(args.buf.cast()).to_str().unwrap();
@@ -113,7 +114,7 @@ unsafe extern "C" fn utp_on_sendto<T: Transport>(args: *mut utp_callback_argumen
     0
 }
 
-unsafe extern "C" fn utp_on_error<T: Transport>(args: *mut utp_callback_arguments) -> uint64 {
+unsafe extern "C" fn utp_on_error(args: *mut utp_callback_arguments) -> uint64 {
     trace!("utp_on_error");
     let args = args.as_mut().unwrap();
     let error = args.__bindgen_anon_1.error_code;
@@ -276,24 +277,52 @@ impl<T> Drop for UtpStream<T> {
 
 impl UtpUdpContext {
     pub async fn new_udp(bind_addr: SocketAddr) -> anyhow::Result<Arc<Self>> {
+        Self::new_udp_with_opts(bind_addr, Default::default()).await
+    }
+
+    pub async fn new_udp_with_opts(
+        bind_addr: SocketAddr,
+        opts: UtpOpts,
+    ) -> anyhow::Result<Arc<Self>> {
         let sock = tokio::net::UdpSocket::bind(bind_addr).await.unwrap();
-        Self::new(sock)
+        Self::new(sock, opts)
     }
 }
 
+#[derive(Default)]
+pub enum UtpLogLevel {
+    #[default]
+    None,
+    Normal,
+    Debug,
+}
+
+#[derive(Default)]
+pub struct UtpOpts {
+    pub log_level: UtpLogLevel,
+}
+
 impl<T: Transport> UtpContext<T> {
-    pub fn new(transport: T) -> anyhow::Result<Arc<Self>> {
+    pub fn new(transport: T, opts: UtpOpts) -> anyhow::Result<Arc<Self>> {
         unsafe {
             let ctx = utp_init(2);
             if ctx.is_null() {
                 bail!("utp_init returned NULL");
             }
 
-            // utp_context_set_option(ctx, UTP_LOG_NORMAL as _, 1);
-            // utp_context_set_option(ctx, UTP_LOG_DEBUG as _, 1);
+            match opts.log_level {
+                UtpLogLevel::None => {}
+                UtpLogLevel::Normal => {
+                    utp_context_set_option(ctx, UTP_LOG_NORMAL as _, 1);
+                }
+                UtpLogLevel::Debug => {
+                    utp_context_set_option(ctx, UTP_LOG_NORMAL as _, 1);
+                    utp_context_set_option(ctx, UTP_LOG_DEBUG as _, 1);
+                }
+            };
 
             utp_set_callback(ctx, UTP_ON_CONNECT as c_int, Some(utp_on_connect::<T>));
-            // utp_set_callback(ctx, UTP_LOG as c_int, Some(utp_log::<T>));
+            utp_set_callback(ctx, UTP_LOG as c_int, Some(utp_log));
             utp_set_callback(
                 ctx,
                 UTP_ON_STATE_CHANGE as c_int,
@@ -301,7 +330,7 @@ impl<T: Transport> UtpContext<T> {
             );
             utp_set_callback(ctx, UTP_ON_READ as c_int, Some(utp_on_read::<T>));
             utp_set_callback(ctx, UTP_SENDTO as c_int, Some(utp_on_sendto::<T>));
-            utp_set_callback(ctx, UTP_ON_ERROR as c_int, Some(utp_on_error::<T>));
+            utp_set_callback(ctx, UTP_ON_ERROR as c_int, Some(utp_on_error));
             utp_set_callback(ctx, UTP_ON_ACCEPT as c_int, Some(utp_on_accept::<T>));
 
             let res = Arc::new(Self {
@@ -310,8 +339,7 @@ impl<T: Transport> UtpContext<T> {
                 accept_queue: Default::default(),
                 magic: MAGIC,
             });
-            let resptr: *const Self = res.as_ref();
-            utp_context_set_userdata(ctx, resptr.cast_mut().cast());
+            utp_context_set_userdata(ctx, Arc::as_ptr(&res).cast_mut().cast());
 
             Self::spawn(res.clone());
             Ok(res)
