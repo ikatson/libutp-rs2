@@ -6,7 +6,7 @@ fn main() {
     let bindings = bindgen::Builder::default()
         .use_core()
         .header(format!("{LIBUTP_PATH}/utp.h"))
-        .allowlist_item(".*(utp|UTP).*")
+        .allowlist_item("^(utp|UTP|SHUT_).*")
         .anon_fields_prefix("unnamed_field")
         .opaque_type("socklen_t")
         .blocklist_type("sockaddr")
@@ -29,6 +29,14 @@ fn main() {
                 "__UNUSED_NOT_POSIX"
             },
             "",
+        )
+        .define(
+            if cfg!(debug_assertions) {
+                "UTP_DEBUG_LOGGING"
+            } else {
+                "__UNUSED_UTP_DEBUG_LOGGING"
+            },
+            "1",
         )
         .files(
             [

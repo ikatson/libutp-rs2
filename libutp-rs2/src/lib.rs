@@ -11,16 +11,17 @@ use std::{
     time::Duration,
 };
 
-use anyhow::bail;
+use anyhow::{bail, Context};
+use bstr::BStr;
 use futures::task::AtomicWaker;
 use libutp_rs2_sys::{
     uint64, utp_callback_arguments, utp_check_timeouts, utp_close, utp_connect,
     utp_context_get_userdata, utp_context_set_option, utp_context_set_userdata, utp_create_socket,
     utp_destroy, utp_error_code_names, utp_get_userdata, utp_init, utp_issue_deferred_acks,
-    utp_process_udp, utp_read_drained, utp_set_callback, utp_set_userdata, utp_socket,
-    utp_state_names, utp_write, UTP_LOG, UTP_LOG_DEBUG, UTP_LOG_NORMAL, UTP_ON_ACCEPT,
-    UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO, UTP_STATE_CONNECT,
-    UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
+    utp_process_udp, utp_read_drained, utp_set_callback, utp_set_userdata, utp_shutdown,
+    utp_socket, utp_state_names, utp_write, SHUT_RDWR, UTP_LOG, UTP_LOG_DEBUG, UTP_LOG_NORMAL,
+    UTP_ON_ACCEPT, UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO,
+    UTP_STATE_CONNECT, UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
 };
 use os_socketaddr::OsSocketAddr;
 use parking_lot::{Mutex, ReentrantMutex};
@@ -68,15 +69,23 @@ macro_rules! cbcheck {
         }
     };
     (socket $v:expr, $where:expr) => {{
+        if $v.is_null() {
+            tracing::debug!("{}: socket is null", $where);
+            return 0;
+        }
         let data: *const UtpStreamInner<T> = utp_get_userdata($v).cast();
-        let data = cbcheck!(data, $where, "socket");
-        cbcheck!(magic data.magic, $where, "socket");
+        let data = cbcheck!(data, $where, "socket userdata");
+        cbcheck!(magic data.magic, $where, "socket userdata");
         data
     }};
     (context $v:expr, $where:expr) => {{
+        if $v.is_null() {
+            tracing::debug!("{}: context is null", $where);
+            return 0;
+        }
         let data: *const UtpContext<T> = utp_context_get_userdata($v).cast();
-        let data = cbcheck!(data, $where, "context");
-        cbcheck!(magic data.magic, $where, "context");
+        let data = cbcheck!(data, $where, "context userdata");
+        cbcheck!(magic data.magic, $where, "context userdata");
         data
     }};
     (cbargs $v:expr, $where:expr) => {
@@ -94,11 +103,9 @@ unsafe extern "C" fn utp_on_connect<T>(args: *mut utp_callback_arguments) -> uin
 #[allow(unused)]
 unsafe extern "C" fn utp_log(args: *mut utp_callback_arguments) -> uint64 {
     let args = cbcheck!(cbargs args, "utp_log");
-    if let Ok(logline) = CStr::from_ptr(args.buf.cast()).to_str() {
-        trace!("{}", logline);
-    } else {
-        warn!("utp_log: invalid UTF-8");
-    }
+    let logline = CStr::from_ptr(args.buf.cast());
+    let logline = BStr::new(logline.to_bytes());
+    trace!("{}", logline);
     0
 }
 
@@ -170,12 +177,12 @@ unsafe extern "C" fn utp_on_accept<T: Transport>(args: *mut utp_callback_argumen
 
 unsafe extern "C" fn utp_on_state_change<T>(args: *mut utp_callback_arguments) -> uint64 {
     let args = cbcheck!(cbargs args, "utp_on_state_change");
-    let sock = cbcheck!(socket args.socket, "utp_on_state_change");
-
     let state = args.unnamed_field1.state;
     #[allow(static_mut_refs)]
     let state_name = get_name(utp_state_names.as_ptr(), state);
-    trace!("state: {:?}", state_name);
+    trace!("state: {:?}, socket={:?}", state_name, args.socket);
+
+    let sock = cbcheck!(socket args.socket, "utp_on_state_change");
 
     match state as u32 {
         UTP_STATE_EOF => {
@@ -254,6 +261,7 @@ impl<T> Default for UtpStreamInner<T> {
 pub struct UtpStream<T> {
     inner: Box<UtpStreamInner<T>>,
     ctx: Arc<UtpContext<T>>,
+    shutdown_called: bool,
 }
 
 impl<T> UtpStream<T> {
@@ -265,6 +273,7 @@ impl<T> UtpStream<T> {
                 ..Default::default()
             }),
             ctx,
+            shutdown_called: false,
         };
         let inner_ptr: *const UtpStreamInner<T> = s.inner.as_ref();
         unsafe { utp_set_userdata(sock, inner_ptr.cast_mut().cast()) };
@@ -294,7 +303,9 @@ impl UtpUdpContext {
         bind_addr: SocketAddr,
         opts: UtpOpts,
     ) -> anyhow::Result<Arc<Self>> {
-        let sock = tokio::net::UdpSocket::bind(bind_addr).await.unwrap();
+        let sock = tokio::net::UdpSocket::bind(bind_addr)
+            .await
+            .with_context(|| format!("error binding to {bind_addr}"))?;
         Self::new(sock, opts)
     }
 }
@@ -323,9 +334,11 @@ impl<T: Transport> UtpContext<T> {
             match opts.log_level {
                 UtpLogLevel::None => {}
                 UtpLogLevel::Normal => {
+                    trace!("setting UTP_LOG_NORMAL=1");
                     utp_context_set_option(ctx, UTP_LOG_NORMAL as _, 1);
                 }
                 UtpLogLevel::Debug => {
+                    trace!("setting UTP_LOG_NORMAL=1; UTP_LOG_DEBUG=1");
                     utp_context_set_option(ctx, UTP_LOG_NORMAL as _, 1);
                     utp_context_set_option(ctx, UTP_LOG_DEBUG as _, 1);
                 }
@@ -461,6 +474,8 @@ impl<T: Transport> AsyncWrite for UtpStream<T> {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         with_global_lock(|| {
+            // If we got poll ready, we better be able to send.
+            // So run it under lock, cause libutp doesn't handle send errors in any way.
             let ctx = self.get_context();
             match ctx.transport.poll_send_ready(cx) {
                 Poll::Ready(Ok(())) => {}
@@ -488,14 +503,26 @@ impl<T: Transport> AsyncWrite for UtpStream<T> {
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> Poll<std::io::Result<()>> {
+        // libutp doesn't implement flush
         Poll::Ready(Err(std::io::Error::other("poll_flush not implemented")))
     }
 
     fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        Poll::Ready(Err(std::io::Error::other("poll_shutdown not implemented")))
+        // If the writer calls shutdown twice, let's actually shutdown without waiting anything.
+        if self.shutdown_called {
+            debug!("forcing shutdown");
+            with_global_lock(|| unsafe {
+                utp_shutdown(self.inner.utp_socket, SHUT_RDWR as _);
+            });
+            return Poll::Ready(Ok(()));
+        }
+        self.shutdown_called = true;
+        Poll::Ready(Err(std::io::Error::other(
+            "poll_shutdown not implemented. If you want to force call utp_shutdown, call it again",
+        )))
     }
 }
 

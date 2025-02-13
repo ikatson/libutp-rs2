@@ -25,7 +25,6 @@
 #include <string.h>
 #include <string.h>
 #include <stdlib.h>
-#include <errno.h>
 #include <limits.h> // for UINT_MAX
 #include <time.h>
 
@@ -1178,7 +1177,7 @@ void UTPSocket::check_timeouts()
 			// Increase RTO
 			const uint new_timeout = ignore_loss ? retransmit_timeout : retransmit_timeout * 2;
 
-			// They initiated the connection but failed to respond before the rto. 
+			// They initiated the connection but failed to respond before the rto.
 			// A malicious client can also spoof the destination address of a ST_SYN bringing us to this state.
 			// Kill the connection and do not notify the upper layer
 			if (state == CS_SYN_RECV) {
@@ -1797,7 +1796,7 @@ size_t utp_process_incoming(UTPSocket *conn, const byte *packet, size_t len, boo
 	// or a malicious attempt to attach the uTP implementation.
 	// acking a packet that hasn't been sent yet!
 	// SYN packets have an exception, since there are no previous packets
-	if ((pk_flags != ST_SYN || conn->state != CS_SYN_RECV) && 
+	if ((pk_flags != ST_SYN || conn->state != CS_SYN_RECV) &&
 		(wrapping_compare_less(conn->seq_nr - 1, pk_ack_nr, ACK_NR_MASK)
 		|| wrapping_compare_less(pk_ack_nr, conn->seq_nr - 1 - curr_window, ACK_NR_MASK))) {
 #if UTP_DEBUG_LOGGING
@@ -2163,7 +2162,7 @@ size_t utp_process_incoming(UTPSocket *conn, const byte *packet, size_t len, boo
 		// Outgoing connection completion
 		if (pk_flags == ST_STATE && conn->state == CS_SYN_SENT)	{
 			conn->state = CS_CONNECTED;
-		
+
 			// If the user has defined the ON_CONNECT callback, use that to
 			// notify the user that the socket is now connected.  If ON_CONNECT
 			// has not been defined, notify the user via ON_STATE_CHANGE.
@@ -2173,7 +2172,7 @@ size_t utp_process_incoming(UTPSocket *conn, const byte *packet, size_t len, boo
 				utp_call_on_state_change(conn->ctx, conn, UTP_STATE_CONNECT);
 
 		// We've sent a fin, and everything was ACKed (including the FIN).
-		// cur_window_packets == acks means that this packet acked all 
+		// cur_window_packets == acks means that this packet acked all
 		// the remaining packets that were in-flight.
 		} else if (conn->fin_sent && conn->cur_window_packets == acks) {
 			conn->fin_sent_acked = true;
@@ -3075,7 +3074,7 @@ static UTPSocket* parse_icmp_payload(utp_context *ctx, const byte *buffer, size_
 // @len: buffer length
 // @to: destination address of the original UDP pakcet
 // @tolen: address length
-// @next_hop_mtu: 
+// @next_hop_mtu:
 int utp_process_icmp_fragmentation(utp_context *ctx, const byte* buffer, size_t len, const struct sockaddr *to, socklen_t tolen, uint16 next_hop_mtu)
 {
 	UTPSocket* conn = parse_icmp_payload(ctx, buffer, len, to, tolen);
