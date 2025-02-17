@@ -1,11 +1,11 @@
 [package]
 name = "libutp-rs2-sys"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Rust bindings for libutp"
 license = "MIT"
-documentation = "https://docs.rs/librqbit-rs2-sys"
-repository = "https://github.com/ikatson/librqbit-rs2"
+documentation = "https://docs.rs/libutp-rs2-sys"
+repository = "https://github.com/ikatson/libutp-rs2"
 readme = "README.md"
 
 [dependencies]

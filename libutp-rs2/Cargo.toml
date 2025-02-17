@@ -2,6 +2,11 @@
 name = "libutp-rs2"
 version = "0.1.0"
 edition = "2021"
+description = "Rust bindings for libutp"
+license = "MIT"
+documentation = "https://docs.rs/libutp-rs2"
+repository = "https://github.com/ikatson/libutp-rs2"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.95"
