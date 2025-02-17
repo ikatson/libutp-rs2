@@ -1,12 +1,3 @@
-Async Tokio library for uTP (uTorrent transport protocol) using C-based [libutp](https://github.com/bittorrent/libutp) under the hood.
-
-Working and tested alternative to [libutp-rs](https://crates.io/crates/libutp-rs)
-
-[Docs](https://docs.rs/librqbit-rs2)
-
-## Example
-
-```#[rust]
 use libutp_rs2::UtpUdpContext;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -40,4 +31,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-```

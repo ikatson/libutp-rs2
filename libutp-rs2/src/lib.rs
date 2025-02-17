@@ -420,12 +420,11 @@ impl<T: Transport> UtpContext<T> {
         });
     }
 
-    pub async fn accept(&self) -> Option<UtpStream<T>> {
+    pub async fn accept(&self) -> anyhow::Result<UtpStream<T>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.accept_queue.lock().push_back(tx);
 
-        let stream = rx.await.unwrap();
-        Some(stream)
+        rx.await.context("server dead")
     }
 
     pub async fn connect(self: &Arc<Self>, addr: SocketAddr) -> anyhow::Result<UtpStream<T>> {

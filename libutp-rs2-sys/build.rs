@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 const LIBUTP_PATH: &str = "libutp";
 
@@ -13,9 +13,9 @@ fn main() {
         .generate()
         .expect("unable to generate bindings");
 
-    // Writing to src makes autocomplete etc work.
+    let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     bindings
-        .write_to_file(Path::new("src").join("bindings.rs"))
+        .write_to_file(out_path)
         .expect("Couldn't write bindings!");
 
     let mut builder = cc::Build::new();
