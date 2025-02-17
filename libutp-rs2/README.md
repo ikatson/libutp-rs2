@@ -6,7 +6,8 @@ Working and tested alternative to [libutp-rs](https://crates.io/crates/libutp-rs
 
 ## Example
 
-```#[rust]
+```rust
+
 use libutp_rs2::UtpUdpContext;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
