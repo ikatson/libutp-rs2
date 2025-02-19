@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+const RX_BUF_CAPACITY: usize = 1024 * 1024;
+
 use anyhow::{bail, Context};
 use bstr::BStr;
 use futures::task::AtomicWaker;
@@ -19,15 +21,16 @@ use libutp_rs2_sys::{
     utp_context_get_userdata, utp_context_set_option, utp_context_set_userdata, utp_create_socket,
     utp_destroy, utp_error_code_names, utp_get_userdata, utp_init, utp_issue_deferred_acks,
     utp_process_udp, utp_read_drained, utp_set_callback, utp_set_userdata, utp_shutdown,
-    utp_socket, utp_state_names, utp_write, SHUT_RDWR, UTP_LOG, UTP_LOG_DEBUG, UTP_LOG_NORMAL,
-    UTP_ON_ACCEPT, UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ, UTP_ON_STATE_CHANGE, UTP_SENDTO,
-    UTP_STATE_CONNECT, UTP_STATE_DESTROYING, UTP_STATE_EOF, UTP_STATE_WRITABLE,
+    utp_socket, utp_state_names, utp_write, SHUT_RDWR, UTP_GET_READ_BUFFER_SIZE, UTP_LOG,
+    UTP_LOG_DEBUG, UTP_LOG_NORMAL, UTP_ON_ACCEPT, UTP_ON_CONNECT, UTP_ON_ERROR, UTP_ON_READ,
+    UTP_ON_STATE_CHANGE, UTP_RCVBUF, UTP_SENDTO, UTP_STATE_CONNECT, UTP_STATE_DESTROYING,
+    UTP_STATE_EOF, UTP_STATE_WRITABLE,
 };
 use os_socketaddr::OsSocketAddr;
 use parking_lot::{Mutex, ReentrantMutex};
 use ringbuf::{
     storage::Heap,
-    traits::{Consumer, Producer},
+    traits::{Consumer, Observer, Producer},
     LocalRb,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -115,9 +118,17 @@ unsafe extern "C" fn utp_on_read<T>(args: *mut utp_callback_arguments) -> uint64
     let inbuf = std::slice::from_raw_parts(args.buf, args.len);
     let mut buf = sock.buffer.lock();
     buf.push_slice(inbuf);
+    drop(buf);
     utp_read_drained(args.socket);
     sock.readable_waker.wake();
     0
+}
+
+unsafe extern "C" fn utp_get_read_buffer_size<T>(args: *mut utp_callback_arguments) -> uint64 {
+    let args = cbcheck!(cbargs args, "utp_get_read_buffer_size");
+    let sock = cbcheck!(socket args.socket, "utp_get_read_buffer_size");
+    let buf = sock.buffer.lock();
+    buf.occupied_len() as uint64
 }
 
 unsafe extern "C" fn utp_on_sendto<T: Transport>(args: *mut utp_callback_arguments) -> uint64 {
@@ -247,7 +258,7 @@ unsafe impl<T: Send> Sync for UtpStreamInner<T> {}
 impl<T> Default for UtpStreamInner<T> {
     fn default() -> Self {
         Self {
-            buffer: Mutex::new(LocalRb::new(1024 * 1024)),
+            buffer: Mutex::new(LocalRb::new(RX_BUF_CAPACITY)),
             magic: MAGIC,
             is_eof: Default::default(),
             readable_waker: Default::default(),
@@ -344,6 +355,8 @@ impl<T: Transport> UtpContext<T> {
                 }
             };
 
+            utp_context_set_option(ctx, UTP_RCVBUF as _, RX_BUF_CAPACITY as i32);
+
             utp_set_callback(ctx, UTP_ON_CONNECT as c_int, Some(utp_on_connect::<T>));
             utp_set_callback(ctx, UTP_LOG as c_int, Some(utp_log));
             utp_set_callback(
@@ -355,6 +368,11 @@ impl<T: Transport> UtpContext<T> {
             utp_set_callback(ctx, UTP_SENDTO as c_int, Some(utp_on_sendto::<T>));
             utp_set_callback(ctx, UTP_ON_ERROR as c_int, Some(utp_on_error));
             utp_set_callback(ctx, UTP_ON_ACCEPT as c_int, Some(utp_on_accept::<T>));
+            utp_set_callback(
+                ctx,
+                UTP_GET_READ_BUFFER_SIZE as c_int,
+                Some(utp_get_read_buffer_size::<T>),
+            );
 
             let res = Arc::new(Self {
                 transport,
