@@ -4,4 +4,4 @@
 
 pub use libc::sockaddr;
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+include!("bindings.rs");

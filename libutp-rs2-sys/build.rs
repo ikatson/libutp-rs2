@@ -1,23 +1,6 @@
-use std::path::PathBuf;
-
 const LIBUTP_PATH: &str = "libutp";
 
 fn main() {
-    let bindings = bindgen::Builder::default()
-        .use_core()
-        .header(format!("{LIBUTP_PATH}/utp.h"))
-        .allowlist_item("^(utp|UTP|SHUT_).*")
-        .anon_fields_prefix("unnamed_field")
-        .opaque_type("socklen_t")
-        .blocklist_type("sockaddr")
-        .generate()
-        .expect("unable to generate bindings");
-
-    let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("bindings.rs");
-    bindings
-        .write_to_file(out_path)
-        .expect("Couldn't write bindings!");
-
     let mut builder = cc::Build::new();
 
     builder
