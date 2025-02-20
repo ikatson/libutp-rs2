@@ -34,7 +34,7 @@ use ringbuf::{
     LocalRb,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 pub use traits::Transport;
 
 static LOCK: ReentrantMutex<()> = ReentrantMutex::new(());
@@ -305,6 +305,28 @@ impl<T> Drop for UtpStream<T> {
     }
 }
 
+fn set_udp_rcvbuf(
+    sock: tokio::net::UdpSocket,
+    bufsize: usize,
+) -> anyhow::Result<tokio::net::UdpSocket> {
+    let sock = sock.into_std()?;
+    let sock = socket2::Socket::from(sock);
+    let previous = sock.recv_buffer_size();
+    if let Err(e) = sock.set_recv_buffer_size(bufsize) {
+        tracing::warn!("error setting UDP socket rcv buf size: {e:#}");
+    } else {
+        let current = sock.recv_buffer_size();
+        tracing::info!(
+            expected = bufsize,
+            ?previous,
+            ?current,
+            "set UDP rcv buf size"
+        )
+    }
+    let sock: std::net::UdpSocket = sock.into();
+    Ok(tokio::net::UdpSocket::from_std(sock)?)
+}
+
 impl UtpUdpContext {
     pub async fn new_udp(bind_addr: SocketAddr) -> anyhow::Result<Arc<Self>> {
         Self::new_udp_with_opts(bind_addr, Default::default()).await
@@ -314,9 +336,12 @@ impl UtpUdpContext {
         bind_addr: SocketAddr,
         opts: UtpOpts,
     ) -> anyhow::Result<Arc<Self>> {
-        let sock = tokio::net::UdpSocket::bind(bind_addr)
+        let mut sock = tokio::net::UdpSocket::bind(bind_addr)
             .await
             .with_context(|| format!("error binding to {bind_addr}"))?;
+        if let Some(so_recvbuf) = opts.udp_rcvbuf {
+            sock = set_udp_rcvbuf(sock, so_recvbuf)?;
+        };
         Self::new(sock, opts)
     }
 }
@@ -332,6 +357,8 @@ pub enum UtpLogLevel {
 #[derive(Default)]
 pub struct UtpOpts {
     pub log_level: UtpLogLevel,
+    /// If set will try to set the SO_RCVBUF option on the socket (if UDP).
+    pub udp_rcvbuf: Option<usize>,
 }
 
 impl<T: Transport> UtpContext<T> {

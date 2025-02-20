@@ -235,6 +235,7 @@ dependencies = [
  "parking_lot",
  "rand",
  "ringbuf",
+ "socket2",
  "tokio",
  "tracing",
  "tracing-subscriber",
