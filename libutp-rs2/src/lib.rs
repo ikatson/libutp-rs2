@@ -34,7 +34,7 @@ use ringbuf::{
     LocalRb,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 pub use traits::Transport;
 
 static LOCK: ReentrantMutex<()> = ReentrantMutex::new(());
