@@ -6,6 +6,14 @@ fn main() {
     builder
         .cpp(true)
         .define(
+            if cfg!(windows) {
+                "WIN32"
+            } else {
+                "__UNUSED_NOT_WIN32"
+            },
+            "",
+        )
+        .define(
             if cfg!(unix) {
                 "POSIX"
             } else {
