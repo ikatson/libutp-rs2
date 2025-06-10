@@ -134,8 +134,12 @@ unsafe extern "C" fn utp_get_read_buffer_size<T>(args: *mut utp_callback_argumen
 unsafe extern "C" fn utp_on_sendto<T: Transport>(args: *mut utp_callback_arguments) -> uint64 {
     let args = cbcheck!(cbargs args, "utp_on_sendto");
     let addr = args.unnamed_field1.address;
-    let addr = match OsSocketAddr::copy_from_raw(addr.cast(), args.unnamed_field2.address_len)
-        .into_addr()
+    #[allow(clippy::useless_conversion)]
+    let addr = match OsSocketAddr::copy_from_raw(
+        addr.cast(),
+        args.unnamed_field2.address_len.try_into().unwrap(),
+    )
+    .into_addr()
     {
         Some(a) => a,
         None => {
@@ -445,7 +449,8 @@ impl<T: Transport> UtpContext<T> {
                                     &buf as *const u8,
                                     len,
                                     osaddr.as_ptr().cast(),
-                                    osaddr.len(),
+                                    #[allow(clippy::useless_conversion)]
+                                    osaddr.len().try_into().unwrap(),
                                 )
                             });
                             if res < 0 {
@@ -482,7 +487,9 @@ impl<T: Transport> UtpContext<T> {
             let stream = UtpStream::<T>::new(sock, self.clone());
             let addr = OsSocketAddr::from(addr);
 
-            let ret = unsafe { utp_connect(sock, addr.as_ptr().cast(), addr.len()) };
+            #[allow(clippy::useless_conversion)]
+            let ret =
+                unsafe { utp_connect(sock, addr.as_ptr().cast(), addr.len().try_into().unwrap()) };
             if ret < 0 {
                 bail!("utp_connect returned an error");
             }
